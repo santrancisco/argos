@@ -9,8 +9,13 @@
  * (https://gnu.org/licenses/gpl.html)
  */
 
+const Lang = imports.lang;
+const GObject = imports.gi.GObject;
+const St = imports.gi.St;
 const GLib = imports.gi.GLib;
+const Clutter = imports.gi.Clutter;
 const Gio = imports.gi.Gio;
+const Config = imports.misc.config;
 
 const Extension = imports.misc.extensionUtils.getCurrentExtension();
 const EMOJI = Extension.imports.emoji.EMOJI;
@@ -108,7 +113,6 @@ function parseLine(lineString) {
   } else {
     line.menuLevel = 0;
   }
-
   line.isSeparator = /^-+$/.test(line.text.trim());
 
   let markupAttributes = [];
@@ -126,23 +130,22 @@ function parseLine(lineString) {
     let fontSize = (isNaN(pointSize)) ? line.size : Math.round(1024 * pointSize).toString();
     markupAttributes.push("font_size='" + GLib.markup_escape_text(fontSize, -1) + "'");
   }
-
   line.markup = line.text;
 
-  if (line.unescape !== "false")
+  if (!line.hasOwnProperty("unescape") || line.unescape !== "false")
     line.markup = GLib.strcompress(line.markup);
 
-  if (line.emojize !== "false") {
+  if (!line.hasOwnProperty("emojize") || line.emojize !== "false") {
     line.markup = line.markup.replace(/:([\w+-]+):/g, function(match, emojiName) {
       emojiName = emojiName.toLowerCase();
       return EMOJI.hasOwnProperty(emojiName) ? EMOJI[emojiName] : match;
     });
   }
 
-  if (line.trim !== "false")
+  if (!line.hasOwnProperty("trim") || line.trim !== "false")
     line.markup = line.markup.trim();
 
-  if (line.useMarkup === "false") {
+  if (line.hasOwnProperty("useMarkup") && line.useMarkup === "false") {
     line.markup = GLib.markup_escape_text(line.markup, -1);
     // Restore escaped ESC characters (needed for ANSI sequences)
     line.markup = line.markup.replace("&#x1b;", "\x1b");
@@ -150,11 +153,16 @@ function parseLine(lineString) {
 
   // Note that while it is possible to format text using a combination of Pango markup
   // and ANSI escape sequences, lines like "<b>ABC \e[1m DEF</b>" lead to unmatched tags
-  if (line.ansi !== "false")
+  if (!line.hasOwnProperty("ansi") || line.ansi !== "false")
     line.markup = ansiToMarkup(line.markup);
 
-  if (markupAttributes.length > 0)
+  if (markupAttributes.length > 0){
+    if(line.hasOwnProperty("color")){
+      line.markup="<span> </span>"+"<span " + markupAttributes.join(" ") + ">" + line.markup + "</span>";
+    }else {
     line.markup = "<span " + markupAttributes.join(" ") + ">" + line.markup + "</span>";
+    }
+  }
 
   if (line.hasOwnProperty("bash")) {
     // Append BitBar's legacy "paramN" attributes to the bash command
@@ -167,7 +175,8 @@ function parseLine(lineString) {
   }
 
   line.hasAction = line.hasOwnProperty("bash") || line.hasOwnProperty("href") ||
-    line.hasOwnProperty("eval") || line.refresh === "true";
+	line.hasOwnProperty("eval") || 
+	(line.hasOwnProperty("refresh") && line.refresh === "true");
 
   return line;
 }
@@ -272,6 +281,12 @@ function spawnWithCallback(workingDirectory, argv, envp, flags, childSetup, call
   });
 }
 
+// 3.36.1 -> 33601
+const shellVersion = Config.PACKAGE_VERSION.split(".").map(Number).reduce(
+  function(a, x) {
+    return 100 * a + x;
+  });
+
 function readStream(stream, callback) {
   stream.read_line_async(GLib.PRIORITY_LOW, null, function(source, result) {
     let [line] = source.read_line_finish(result);
@@ -279,8 +294,158 @@ function readStream(stream, callback) {
     if (line === null) {
       callback(null);
     } else {
-      callback(imports.byteArray.toString(line) + "\n");
+      if (shellVersion <= 33400)
+	callback(String(line) + "\n");
+      else
+	callback(imports.byteArray.toString(line) + "\n");
       readStream(source, callback);
     }
   });
 }
+
+function getActor(obj) {
+  if (shellVersion >= 33400)
+    return obj;
+  else
+    return obj;
+}
+
+function makeSimpleClass(BaseClass, getSuperArgs, initFn, name) {
+  if (shellVersion < 33200) {
+    return new Lang.Class({
+      Name: name,
+      Extends: BaseClass,
+      _init: function(...args) {
+	this.parent(getSuperArgs(...args));
+	initFn.bind(this)(...args);
+      }
+    });
+  } else if (shellVersion < 33400) {
+    return class extends BaseClass {
+      constructor(...args) {
+	super(getSuperArgs(...args));
+	initFn.bind(this)(...args);
+      }
+    }
+  } else {
+    return GObject.registerClass(
+      {
+	GTypeName: name
+      },
+      class extends BaseClass {
+	_init(...args) {
+	  super._init(getSuperArgs(...args));
+	  initFn.bind(this)(...args);
+	}
+      });
+  }
+}
+
+if (shellVersion <= 33400)
+    var AltSwitcher = imports.ui.status.system.AltSwitcher;
+else
+  var AltSwitcher = GObject.registerClass(
+    class AltSwitcher extends St.Bin {
+      _init(standard, alternate) {
+        super._init();
+        this._standard = standard;
+        this._standard.connect('notify::visible', this._sync.bind(this));
+        if (this._standard instanceof St.Button)
+          this._standard.connect('clicked',
+                                 () => this._clickAction.release());
+
+        this._alternate = alternate;
+        this._alternate.connect('notify::visible', this._sync.bind(this));
+        if (this._alternate instanceof St.Button)
+          this._alternate.connect('clicked',
+                                  () => this._clickAction.release());
+
+        this._capturedEventId = global.stage.connect('captured-event', this._onCapturedEvent.bind(this));
+
+        this._flipped = false;
+
+        this._clickAction = new Clutter.ClickAction();
+        this._clickAction.connect('long-press', this._onLongPress.bind(this));
+
+        this.connect('destroy', this._onDestroy.bind(this));
+      }
+
+      vfunc_map() {
+        super.vfunc_map();
+        this._flipped = false;
+      }
+
+      vfunc_unmap() {
+        super.vfunc_unmap();
+        this._flipped = false;
+      }
+
+      _sync() {
+        let childToShow = null;
+
+        if (this._standard.visible && this._alternate.visible) {
+          let [x_, y_, mods] = global.get_pointer();
+          let altPressed = (mods & Clutter.ModifierType.MOD1_MASK) != 0;
+          if (this._flipped)
+            childToShow = altPressed ? this._standard : this._alternate;
+          else
+            childToShow = altPressed ? this._alternate : this._standard;
+        } else if (this._standard.visible) {
+          childToShow = this._standard;
+        } else if (this._alternate.visible) {
+          childToShow = this._alternate;
+        } else {
+          this.hide();
+          return;
+        }
+
+        let childShown = this.get_child();
+        if (childShown != childToShow) {
+          if (childShown) {
+            if (childShown.fake_release)
+              childShown.fake_release();
+            childShown.remove_action(this._clickAction);
+          }
+          childToShow.add_action(this._clickAction);
+
+          let hasFocus = this.contains(global.stage.get_key_focus());
+          this.set_child(childToShow);
+          if (hasFocus)
+            childToShow.grab_key_focus();
+
+	  // The actors might respond to hover, so
+          // sync the pointer to make sure they update.
+          global.sync_pointer();
+        }
+
+        this.show();
+      }
+
+      _onDestroy() {
+        if (this._capturedEventId > 0) {
+          global.stage.disconnect(this._capturedEventId);
+          this._capturedEventId = 0;
+        }
+      }
+
+      _onCapturedEvent(actor, event) {
+        let type = event.type();
+        if (type == Clutter.EventType.KEY_PRESS || type == Clutter.EventType.KEY_RELEASE) {
+          let key = event.get_key_symbol();
+          if (key == Clutter.KEY_Alt_L || key == Clutter.KEY_Alt_R)
+            this._sync();
+        }
+
+        return Clutter.EVENT_PROPAGATE;
+      }
+
+      _onLongPress(action, actor, state) {
+        if (state == Clutter.LongPressState.QUERY ||
+            state == Clutter.LongPressState.CANCEL)
+          return true;
+
+        this._flipped = !this._flipped;
+        this._sync();
+        return true;
+      }
+    });

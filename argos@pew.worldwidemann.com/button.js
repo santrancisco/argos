@@ -33,7 +33,7 @@ var ArgosButton = new Lang.Class({
 
     this._lineView = new ArgosLineView();
     this._lineView.setMarkup("<small><i>" + GLib.markup_escape_text(file.get_basename(), -1) + " ...</i></small>");
-    this.add_actor(this._lineView);
+    Utilities.getActor(this).add_actor(this._lineView);
 
     this._isDestroyed = false;
 
@@ -136,9 +136,9 @@ var ArgosButton = new Lang.Class({
       this._cycleTimeout = null;
     }
 
-    this.visible = buttonLines.length > 0 || !dropdownMode;
+    Utilities.getActor(this).visible = buttonLines.length > 0 || !dropdownMode;
 
-    if (!this.visible)
+    if (!Utilities.getActor(this).visible)
       return;
 
     if (buttonLines.length === 0) {
@@ -188,11 +188,13 @@ var ArgosButton = new Lang.Class({
         // Once it is fixed, this code will work as expected for nested submenus.
         menuItem = new PopupMenu.PopupSubMenuMenuItem("", false);
         let lineView = new ArgosLineView(dropdownLines[i]);
-        menuItem.actor.insert_child_below(lineView, menuItem.label);
+        menuItem.insert_child_below(lineView, menuItem.label);
         menuItem.label.visible = false;
         menus[dropdownLines[i + 1].menuLevel] = menuItem.menu;
-      } else if ((i + 1) < dropdownLines.length && dropdownLines[i + 1].menuLevel === dropdownLines[i].menuLevel &&
-        dropdownLines[i + 1].alternate === "true") {
+      } else if ((i + 1) < dropdownLines.length &&
+		 dropdownLines[i + 1].menuLevel === dropdownLines[i].menuLevel &&
+		 dropdownLines[i + 1].hasOwnProperty("alternate") &&
+		 dropdownLines[i + 1].alternate === "true") {
         menuItem = new ArgosMenuItem(this, dropdownLines[i], dropdownLines[i + 1]);
         // Skip alternate line
         i++;
